@@ -41,7 +41,7 @@ async def play(interaction: discord.Interaction, link: str):
     playing = True
     await interaction.response.send_message(f"Playing music from: {link}")
     toDownload.append(link)
-    print(f"toDownload list updated: {toDownload}")
+    print(f"toDownload list added: {toDownload}")
 
     vc = interaction.user.voice.channel
     # connect to VC (or move if already connected)
@@ -51,19 +51,21 @@ async def play(interaction: discord.Interaction, link: str):
         await interaction.guild.voice_client.move_to(vc)
 
     await join_vc(vc)
-    await play_music()
-
+    while (len(toPlay) == 0):
+        await asyncio.sleep(1)
+    playing = True
 
 async def download_music():
     while True:
         if not toDownload:
-            await asyncio.sleep(5)
+            await asyncio.sleep(1)
             continue
         link = toDownload.pop(0)
         title = await get_link_title(link)
         if os.path.exists(title):
             print(f"File already exists for link: {title}")
             toPlay.append(title)
+            print(f"toPlay list added: {toPlay}")
             continue
         
         print(f"Downloading music from: {link}")
@@ -84,11 +86,13 @@ async def download_music():
                 ydl.download([link])
                 print(f"Downloaded: {link}")
                 toPlay.append(title)
+                print(f"toPlay list added: {toPlay}")
             except Exception as e:
                 print(f"Error downloading {link}: {e}")
                 
 async def play_music():
     global playing
+    global toDownload, toPlay
     while True:
         if playing == False or len(toPlay) == 0:
             await asyncio.sleep(1)
@@ -103,17 +107,33 @@ async def play_music():
             vc = guild.voice_client
             if vc and vc.is_connected():
                 break
-
         if vc is None:
-            return
-
-        if not vc.is_playing():
-            vc.play(FFmpegPCMAudio(filepath))
+            await asyncio.sleep(1)
+            continue
+        
+        audio_source = None
+        try:
+            audio_source = FFmpegPCMAudio(filepath)
+            vc.play(audio_source)
             print(f"Now playing: {filepath}")
-            
-            # Wait for the song to finish
+
             while vc.is_playing():
+                if(vc.is_connected() == False):
+                    vc.stop()
+                    playing = False
+                    toDownload.clear()
+                    toPlay.clear()
+                    break
                 await asyncio.sleep(1)
+            print(f"Finished playing: {filepath}")
+
+        except Exception as e:
+            print(f"Playback error: {e}")
+
+        finally:
+            # Make sure FFmpeg process is terminated
+            if audio_source:
+                audio_source.cleanup()
    
 async def join_vc(vc: discord.VoiceChannel):
     if vc.guild.voice_client is None:
@@ -121,7 +141,7 @@ async def join_vc(vc: discord.VoiceChannel):
     else:
         await vc.guild.voice_client.move_to(vc)
 
-async def get_link_title(link: str) -> str:
+async def get_link_title(link: str):
     ydl_opts = {
         'format': 'bestaudio/best',
         'outtmpl': './downloaded/%(title)s.%(ext)s',
