@@ -29,7 +29,7 @@ async def on_ready():
         print(f"Synced {len(synced)} slash commands.")
 
     except Exception as e:
-        print(f"Error syncing commands: {e}")
+        print(f"[on_ready] Error syncing commands: {e}")
         quit()
 
     bot.loop.create_task(download_music())
@@ -51,9 +51,49 @@ async def play(interaction: discord.Interaction, link: str):
         await interaction.guild.voice_client.move_to(vc)
 
     await join_vc(vc)
-    while (len(toPlay) == 0):
-        await asyncio.sleep(1)
     playing = True
+
+@bot.tree.command(name="stop", description="Stop playing music and disconnect")
+async def stop(interaction: discord.Interaction):
+    global playing
+    global toDownload, toPlay
+    playing = False
+    toDownload.clear()
+    toPlay.clear()
+    vc = interaction.guild.voice_client
+    if vc and vc.is_playing():
+        vc.stop()
+        await interaction.response.send_message("Stopped playing.")
+    else:
+        await interaction.response.send_message("No song is currently playing.")
+
+@bot.tree.command(name="disconnect", description="Stop playing music and disconnect")
+async def stop(interaction: discord.Interaction):
+    global playing
+    global toDownload, toPlay
+    playing = False
+    toDownload.clear()
+    toPlay.clear()
+    if interaction.guild.voice_client is not None:
+        await interaction.guild.voice_client.disconnect()
+    await interaction.response.send_message("Stopped playing and disconnected.")
+
+@bot.tree.command(name="skip", description="Skip the current song")
+async def skip(interaction: discord.Interaction):
+    vc = interaction.guild.voice_client
+    if vc and vc.is_playing():
+        vc.stop()
+        await interaction.response.send_message("Skipped the current song.")
+    else:
+        await interaction.response.send_message("No song is currently playing.")
+
+@bot.tree.command(name="playlist", description="Display the current playlist")
+async def playlist(interaction: discord.Interaction):
+    if len(toPlay) == 0:
+        await interaction.response.send_message("The playlist is empty.")
+    else:
+        playlist_str = "\n".join([f"{i+1}. {os.path.basename(song)}" for i, song in enumerate(toPlay)])
+        await interaction.response.send_message(f"Current Playlist:\n{playlist_str}")
 
 async def download_music():
     while True:
@@ -61,7 +101,11 @@ async def download_music():
             await asyncio.sleep(1)
             continue
         link = toDownload.pop(0)
-        title = await get_link_title(link)
+        try:
+            title = await get_link_title(link)
+        except Exception as e:
+            print(f"[get_link_title] Error in function: {e}")
+            continue
         if os.path.exists(title):
             print(f"File already exists for link: {title}")
             toPlay.append(title)
@@ -88,12 +132,20 @@ async def download_music():
                 toPlay.append(title)
                 print(f"toPlay list added: {toPlay}")
             except Exception as e:
-                print(f"Error downloading {link}: {e}")
+                print(f"[download_music] Error fetching link {link}: {e}")
                 
 async def play_music():
     global playing
     global toDownload, toPlay
     while True:
+        for guild in bot.guilds:
+            vc = guild.voice_client
+            if vc and vc.is_connected():
+                break
+        if vc is None:
+            await asyncio.sleep(1)
+            continue
+
         if playing == False or len(toPlay) == 0:
             await asyncio.sleep(1)
             continue
@@ -102,14 +154,6 @@ async def play_music():
         if not os.path.exists(filepath):
             print(f"File not found: {filepath}")
             return
-        
-        for guild in bot.guilds:
-            vc = guild.voice_client
-            if vc and vc.is_connected():
-                break
-        if vc is None:
-            await asyncio.sleep(1)
-            continue
         
         audio_source = None
         try:
@@ -125,12 +169,11 @@ async def play_music():
                     toPlay.clear()
                     break
                 await asyncio.sleep(1)
-            print(f"Finished playing: {filepath}")
-
         except Exception as e:
-            print(f"Playback error: {e}")
+            print(f"[play_music] Playback error: {e}")
 
         finally:
+            print(f"Finished playing: {filepath}")
             # Make sure FFmpeg process is terminated
             if audio_source:
                 audio_source.cleanup()
@@ -153,14 +196,17 @@ async def get_link_title(link: str):
             'preferredquality': '192',
         }],
     }
-
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info_dict = ydl.extract_info(link, download=False)  # metadata only
-        # Get original filename (before postprocessing)
-        filename = ydl.prepare_filename(info_dict)
-        # Replace extension with postprocessor target (mp3 here)
-        final_name = filename.rsplit('.', 1)[0] + ".mp3"
-        return final_name
+        try:
+            info_dict = ydl.extract_info(link, download=False)  # metadata only
+            # Get original filename (before postprocessing)
+            filename = ydl.prepare_filename(info_dict)
+            # Replace extension with postprocessor target (mp3 here)
+            final_name = filename.rsplit('.', 1)[0] + ".mp3"
+            return final_name
+        except Exception as e:
+            print(f"[get_link_title] Error fetching link {link}: {e}")
+            raise e
 
 if __name__ == '__main__':
     if TOKEN is None:
