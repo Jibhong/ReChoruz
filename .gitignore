@@ -1,14 +1,5 @@
 
 .env
-
-
 .vscode/
-
-
-*.code-runner*
-
-
-*.tmp
-*.temp
-
 downloaded/
+tempCodeRunnerFile.py
