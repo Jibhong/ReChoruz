@@ -13,7 +13,7 @@ from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 # Load environment variables from .env file
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
-GUILD_ID = int(os.getenv('GUILD_ID', 0))
+# GUILD_ID = int(os.getenv('GUILD_ID', 0))
 TIMEOUT = 3
 
 bot = commands.Bot(command_prefix="!", intents=discord.Intents.all())
