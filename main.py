@@ -5,6 +5,10 @@ from discord import FFmpegPCMAudio, app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
 import yt_dlp
+from yt_dlp.utils import sanitize_filename
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+
+
 
 # Load environment variables from .env file
 load_dotenv()
@@ -41,6 +45,8 @@ async def play(interaction: discord.Interaction, link: str):
     musicPlayer = next((x[0] for x in server_list if x[1] == interaction.guild.id), None)
     if musicPlayer is None:
         return
+    
+    link = await clean_url(link)
     toDownload = musicPlayer.toDownload
 
     await interaction.response.send_message(f"Playing music from: {link}")
@@ -108,13 +114,23 @@ async def playlist(interaction: discord.Interaction):
         return
     
     musicPlayer = next((x[0] for x in server_list if x[1] == interaction.guild.id), None)
-    toPlay = musicPlayer.toPlay
 
-    if len(toPlay) == 0:
+    if len(musicPlayer.toPlay) == 0 and len(musicPlayer.toProcessName) == 0:
         await interaction.response.send_message("The playlist is empty.")
     else:
-        playlist_str = "\n".join([f"{i+1}. {os.path.basename(song)}" for i, song in enumerate(toPlay)])
-        await interaction.response.send_message(f"Current Playlist:\n{playlist_str}")
+        playlist_str = f"▶️ **{musicPlayer.playingName}**\n"
+        for i in range(len(musicPlayer.toPlay)):
+            playlist_str += f"{i+1}. ✅ {musicPlayer.toPlay[i]}\n"
+        for i in range(len(musicPlayer.toProcessName)):
+            playlist_str += f"{len(musicPlayer.toPlay)+i+1}. ⚙️ {musicPlayer.toProcessName[i]}\n"
+        embed = discord.Embed(
+            title="🎵 Playlist",
+            description="\n".join(
+                [playlist_str]
+            ),
+            color=discord.Color.blue()
+        )
+        await interaction.response.send_message(embed=embed)
 
 class MusicPlayer:
 
@@ -122,6 +138,8 @@ class MusicPlayer:
         self.guild = guild
         self.toDownload = []
         self.toPlay = []
+        self.toProcessName = []
+        self.playingName = ""
         self.playing = False
         self.stopped = False
 
@@ -134,40 +152,51 @@ class MusicPlayer:
                 continue
             link = self.toDownload.pop(0)
             try:
-                title = await get_link_title(link)
+                title_list,url_list = await get_mp3_list(link)
             except Exception as e:
                 print(f"[get_link_title] Error in function: {e}")
                 continue
-            if os.path.exists(title):
-                print(f"File already exists for link: {title}")
-                self.toPlay.append(title)
-                print(f"toPlay list added: {self.toPlay}")
-                continue
-            
-            print(f"Downloading music from: {link}")
-            ydl_opts = {
-                'format': 'bestaudio/best',
-                'outtmpl': './downloaded/%(title)s.%(ext)s',
-                'postprocessors': [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': '192',
-                }],
-                'quiet': True,
-                'noplaylist': True,
-            }
-
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            for title in title_list:
+                self.toProcessName.append(title)
+            for title, url in zip(title_list, url_list):
+                print(f"Processing link: {url} with title: {title}")
+                if os.path.exists(os.path.join("./downloaded/", title)):
+                    print(f"File already exists for link: {title}")
+                    self.toPlay.append(title)
+                    self.toProcessName.pop(0)
+                    print(f"toPlay list added: {self.toPlay}")
+                    continue
+                
+                ydl_opts = {
+                    'format': 'bestaudio/best',
+                    'outtmpl': f'./downloaded/{title[:-4]}.%(ext)s',
+                    'postprocessors': [{
+                        'key': 'FFmpegExtractAudio',
+                        'preferredcodec': 'mp3',
+                        'preferredquality': '192',
+                    }],
+                    'quiet': True,
+                    'noplaylist': True,
+                    'overwrites': False,
+                }
                 try:
-                    ydl.download([link])
-                    print(f"Downloaded: {link}")
+                    loop = asyncio.get_running_loop()
+                    def _download():
+                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                            ydl.download([url])
+                    await loop.run_in_executor(None, _download)
+                    print(f"Downloaded: {url}")
                     self.toPlay.append(title)
                     print(f"toPlay list added: {self.toPlay}")
                 except Exception as e:
-                    print(f"[download_music] Error fetching link {link}: {e}")
+                    print(f"[download_music] Error fetching link {url}: {e}")
+                finally:
+                    self.toProcessName.pop(0)
                 
     async def play_music(self):
+        print("play_music task started")
         while True:
+            self.playingName = "Nothing..."
             if(self.stopped):
                 return
             vc = self.guild.voice_client
@@ -175,17 +204,18 @@ class MusicPlayer:
                 await asyncio.sleep(1)
                 continue
             print(f"toPlay list: {self.toPlay}")
-            filepath = self.toPlay.pop(0)
+            filename = self.toPlay.pop(0)
+            filepath = os.path.join("./downloaded/", filename)
             if not os.path.exists(filepath):
                 print(f"File not found: {filepath}")
-                return
+                continue
             
             audio_source = None
             try:
                 audio_source = FFmpegPCMAudio(filepath)
                 vc.play(audio_source)
                 print(f"Now playing: {filepath}")
-
+                self.playingName = filename
                 while vc.is_playing():
                     if(vc.is_connected() == False):
                         vc.stop()
@@ -223,29 +253,46 @@ async def auto_remove_player():
                 continue
             server_list[i] = (player, guild_id, time_left - 1)
 
-async def get_link_title(link: str):
-        ydl_opts = {
-            'format': 'bestaudio/best',
-            'outtmpl': './downloaded/%(title)s.%(ext)s',
-            'quiet': True,
-            'noplaylist': True,
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
-        }
+async def get_mp3_list(url: str):
+    loop = asyncio.get_running_loop()
+
+    ydl_opts = {
+        "quiet": True,
+        "extract_flat": True,  # don’t download, just list
+    }
+    def _extract():
+        name_list = []
+        url_list = []
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            try:
-                info_dict = ydl.extract_info(link, download=False)  # metadata only
-                # Get original filename (before postprocessing)
-                filename = ydl.prepare_filename(info_dict)
-                # Replace extension with postprocessor target (mp3 here)
-                final_name = filename.rsplit('.', 1)[0] + ".mp3"
-                return final_name
-            except Exception as e:
-                print(f"[get_link_title] Error fetching link {link}: {e}")
-                raise e
+            info = ydl.extract_info(url, download=False)
+
+            # If it's a playlist loop entries
+            if "entries" in info:
+                for entry in info["entries"]:
+                    name_list.append(sanitize_filename(f"{entry['title']}.mp3"))
+                    url_list.append(entry['url'])
+            else:  # single video
+                if("url" in info):
+                    url_list.append(entry['url'])
+                else:
+                    url_list.append(info['webpage_url'])
+                name_list.append(sanitize_filename(f"{info['title']}.mp3"))
+
+        return name_list, url_list
+    return await loop.run_in_executor(None, _extract)
+    
+
+async def clean_url(url: str) -> str:
+    parsed = urlparse(url)
+
+    # only clean if it's a watch URL
+    if "watch" in parsed.path:
+        query = parse_qs(parsed.query)
+        query.pop("list", None)  # remove &list= if present
+        new_query = urlencode(query, doseq=True)
+        return urlunparse(parsed._replace(query=new_query))
+    
+    return url
 
 if __name__ == '__main__':
     if TOKEN is None:
